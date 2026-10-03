@@ -34,6 +34,7 @@ jobs:
           ollama pull deepseek-coder 2>/dev/null || true
           ollama pull phi 2>/dev/null || true
           ollama pull cogito 2>/dev/null || true
+          echo "--- MODELS ---"
           ollama list
 
       - name: Print Connection Credentials
