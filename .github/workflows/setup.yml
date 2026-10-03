@@ -2,7 +2,7 @@ name: Setup Mr. Braincells Environment
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -12,31 +12,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup environment
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
         run: |
-          echo "=== Mr. Braincells Environment Setup ==="
-          echo "Installing dependencies..."
-          echo "Setting up Ollama..."
+          pip install -r requirements.txt
+
+      - name: Install Ollama
+        run: |
           curl -fsSL https://ollama.com/install.sh | sh
-          echo "Starting Ollama..."
+
+      - name: Setup Ollama
+        run: |
           ollama serve &
-          sleep 10
-          echo "Pulling recommended models..."
+          sleep 15
           ollama pull llama3.2 2>/dev/null || true
           ollama pull mistral 2>/dev/null || true
           ollama pull deepseek-coder 2>/dev/null || true
-          echo "=== Setup Complete ==="
-          echo "CLI: mr-braincells"
-          echo "Access via: ./mr-braincells"
-          echo "Ollama endpoint: http://localhost:11434"
+          ollama pull phi 2>/dev/null || true
+          ollama pull cogito 2>/dev/null || true
+          ollama list
 
       - name: Print Connection Credentials
         run: |
-          echo "================================================"
-          echo "MR. BRAINCELLS - CONNECTION CREDENTIALS"
-          echo "================================================"
-          echo "CLI Command: mr-braincells"
-          echo "Ollama API: http://localhost:11434/api/generate"
-          echo "Models available:"
-          ollama list 2>/dev/null || echo "Run 'ollama list' after setup"
-          echo "================================================"
+          python3 scripts/print_creds.py
