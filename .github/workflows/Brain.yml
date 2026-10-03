@@ -7,24 +7,39 @@ permissions:
   contents: read
 
 jobs:
-  ai-server:
+  braincells:
     runs-on: ubuntu-latest
     timeout-minutes: 345
 
     env:
+      # Lightweight model for the 8 GB / 2 CPU private runner.
       OLLAMA_MODEL: qwen3:4b
-      OLLAMA_HOST: 127.0.0.1:11434
+
+      # Ollama stays localhost-only.
+      # Tailscale Serve handles the private network exposure.
+      OLLAMA_HOST: "127.0.0.1:11434"
+
+      # Keep memory usage conservative.
       OLLAMA_CONTEXT_LENGTH: "4096"
       OLLAMA_NUM_PARALLEL: "1"
       OLLAMA_MAX_LOADED_MODELS: "1"
       OLLAMA_KEEP_ALIVE: "-1"
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+
+      # ==========================================================
+      # CHECKOUT
+      # ==========================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # ==========================================================
+      # PYTHON
+      # ==========================================================
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -39,50 +54,104 @@ jobs:
             pip install -r requirements.txt
           fi
 
+      # ==========================================================
+      # OLLAMA INSTALL
+      # ==========================================================
+
       - name: Install Ollama
         shell: bash
         run: |
           set -e
 
+          echo "Installing Ollama..."
+
           curl -fsSL https://ollama.com/install.sh | sh
+
+          echo ""
+          echo "Ollama binary:"
+          command -v ollama
+
+          echo ""
+          echo "Ollama version:"
           ollama --version
+
+      # ==========================================================
+      # IMPORTANT:
+      # Ollama's installer creates a systemd service.
+      # That service was the reason your previous run stayed on
+      # 127.0.0.1 even though OLLAMA_HOST was set differently.
+      # ==========================================================
+
+      - name: Disable installer Ollama service
+        shell: bash
+        run: |
+          set +e
+
+          echo "Stopping installer-created Ollama service..."
+
+          sudo systemctl stop ollama.service 2>/dev/null
+          sudo systemctl disable ollama.service 2>/dev/null
+          sudo systemctl mask ollama.service 2>/dev/null
+
+          # Kill any remaining Ollama server process.
+          sudo pkill -f '[o]llama serve' 2>/dev/null
+
+          sleep 2
+
+          echo ""
+          echo "Checking port 11434..."
+
+          sudo ss -lntp | grep ':11434' || true
+
+      # ==========================================================
+      # TAILSCALE
+      # ==========================================================
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Verify Tailscale
+      - name: Get Tailscale address
         shell: bash
         run: |
           set -e
 
-          echo "========== TAILSCALE =========="
+          echo "Waiting for Tailscale..."
 
-          tailscale status
+          TS_IP=""
 
-          echo ""
-          echo "IPv4:"
-          TS_IP="$(tailscale ip -4)"
+          for i in {1..20}; do
+            TS_IP="$(tailscale ip -4 2>/dev/null || true)"
+
+            if [ -n "$TS_IP" ]; then
+              break
+            fi
+
+            sleep 2
+          done
 
           if [ -z "$TS_IP" ]; then
-            echo "ERROR: No Tailscale IPv4 address."
+            echo "ERROR: Tailscale IPv4 address was not assigned."
+            tailscale status || true
             exit 1
           fi
 
-          echo "$TS_IP"
+          echo "Tailscale IP: $TS_IP"
+
           echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
+
+      # ==========================================================
+      # START EXACTLY ONE OLLAMA INSTANCE
+      # ==========================================================
 
       - name: Start Ollama
         shell: bash
         run: |
           set -e
 
-          echo "Stopping any existing Ollama process..."
-          pkill -x ollama 2>/dev/null || true
-          sleep 2
-
           echo "Starting Ollama..."
+
           nohup env \
             OLLAMA_HOST="$OLLAMA_HOST" \
             OLLAMA_CONTEXT_LENGTH="$OLLAMA_CONTEXT_LENGTH" \
@@ -92,16 +161,23 @@ jobs:
             ollama serve \
             > "$RUNNER_TEMP/ollama.log" 2>&1 &
 
-          echo $! > "$RUNNER_TEMP/ollama.pid"
+          OLLAMA_PID=$!
 
-          echo "Waiting for API..."
+          echo "Ollama PID: $OLLAMA_PID"
+          echo "$OLLAMA_PID" > "$RUNNER_TEMP/ollama.pid"
+
+          echo ""
+          echo "Waiting for Ollama API..."
+
+          READY="false"
 
           for i in {1..45}; do
             if curl -fsS \
               --connect-timeout 2 \
               http://127.0.0.1:11434/api/tags \
-              >/dev/null; then
+              >/dev/null 2>&1; then
 
+              READY="true"
               echo "Ollama is ONLINE."
               break
             fi
@@ -109,20 +185,31 @@ jobs:
             sleep 2
           done
 
-          if ! curl -fsS \
-            --connect-timeout 5 \
-            http://127.0.0.1:11434/api/tags \
-            >/dev/null; then
-
+          if [ "$READY" != "true" ]; then
             echo ""
-            echo "========== OLLAMA FAILED =========="
+            echo "ERROR: Ollama did not start."
+            echo ""
+            echo "========== OLLAMA LOG =========="
             cat "$RUNNER_TEMP/ollama.log" || true
             exit 1
           fi
 
           echo ""
-          echo "========== LISTENING =========="
-          ss -lntp | grep 11434 || true
+          echo "========== SOCKET =========="
+
+          ss -lntp | grep ':11434' || true
+
+          echo ""
+          echo "========== LOCAL API =========="
+
+          curl -fsS \
+            http://127.0.0.1:11434/api/tags
+
+          echo ""
+
+      # ==========================================================
+      # MODEL
+      # ==========================================================
 
       - name: Pull model
         shell: bash
@@ -130,39 +217,61 @@ jobs:
           set -e
 
           echo "Pulling $OLLAMA_MODEL..."
+
           ollama pull "$OLLAMA_MODEL"
 
           echo ""
           echo "========== INSTALLED MODELS =========="
+
           ollama list
 
-      - name: Test Ollama locally
+      # ==========================================================
+      # MODEL TEST
+      # ==========================================================
+
+      - name: Test model
         shell: bash
         run: |
           set -e
 
-          echo "Testing Ollama API..."
+          echo "Testing model generation..."
 
-          curl -fsS \
-            --connect-timeout 5 \
-            --max-time 180 \
-            http://127.0.0.1:11434/api/generate \
-            -H "Content-Type: application/json" \
-            -d '{
-              "model": "qwen3:4b",
-              "prompt": "Reply with exactly: Braincells online.",
-              "stream": false
-            }'
+          RESPONSE="$(
+            curl -fsS \
+              --connect-timeout 10 \
+              --max-time 180 \
+              http://127.0.0.1:11434/api/generate \
+              -H "Content-Type: application/json" \
+              -d '{
+                "model": "qwen3:4b",
+                "prompt": "Reply with exactly: Braincells online.",
+                "stream": false
+              }'
+          )"
 
           echo ""
-          echo "Local Ollama test PASSED."
+          echo "========== MODEL RESPONSE =========="
+          echo "$RESPONSE"
 
-      - name: Configure Tailscale TCP forwarding
+          echo ""
+          echo "Model test PASSED."
+
+      # ==========================================================
+      # TAILSCALE SERVE
+      #
+      # Tailscale listens on the tailnet side and forwards traffic
+      # to localhost:11434.
+      # ==========================================================
+
+      - name: Configure Tailscale Serve
         shell: bash
         run: |
           set -e
 
-          echo "Configuring private Tailscale forwarding..."
+          echo "Resetting previous Serve configuration..."
+          tailscale serve reset >/dev/null 2>&1 || true
+
+          echo "Creating TCP forwarding..."
 
           tailscale serve \
             --bg \
@@ -170,37 +279,47 @@ jobs:
             tcp://127.0.0.1:11434
 
           echo ""
-          echo "========== TAILSCALE SERVE =========="
+          echo "========== SERVE STATUS =========="
 
           tailscale serve status
 
-      - name: Verify Serve configuration
+      # ==========================================================
+      # VERIFY SERVE CONFIG
+      # ==========================================================
+
+      - name: Verify Tailscale Serve
         shell: bash
         run: |
           set -e
 
-          echo "Checking Tailscale Serve..."
+          echo "Checking Tailscale Serve configuration..."
 
-          STATUS="$(tailscale serve status 2>&1 || true)"
+          STATUS="$(
+            tailscale serve status 2>&1
+          )"
 
           echo "$STATUS"
 
           if ! echo "$STATUS" | grep -q "11434"; then
             echo ""
-            echo "ERROR: Tailscale Serve did not expose port 11434."
+            echo "ERROR: Tailscale Serve does not contain port 11434."
             exit 1
           fi
 
           echo ""
-          echo "Tailscale Serve configuration PASSED."
+          echo "Tailscale Serve PASSED."
+
+      # ==========================================================
+      # CONNECTION INFO
+      # ==========================================================
 
       - name: Print connection information
         shell: bash
         run: |
           echo ""
-          echo "=================================================="
+          echo "======================================================"
           echo "              MR. BRAINCELLS ONLINE"
-          echo "=================================================="
+          echo "======================================================"
           echo ""
           echo "Tailscale IP:"
           echo "$TS_IP"
@@ -220,32 +339,40 @@ jobs:
           echo "Models:"
           ollama list
           echo ""
-          echo "=================================================="
-          echo "KEEP THIS WORKFLOW RUNNING"
-          echo "=================================================="
+          echo "======================================================"
+          echo "             SERVER IS READY"
+          echo "======================================================"
           echo ""
-          echo "This endpoint is available through Tailscale."
-          echo "It is NOT exposed through the public internet."
+          echo "Keep this workflow running."
+          echo "The server exists only while this job is running."
+          echo ""
+
+      # ==========================================================
+      # KEEP ALIVE
+      # ==========================================================
 
       - name: Keep server alive
         shell: bash
         run: |
-          echo "Mr. Braincells is ONLINE."
+          echo "Mr. Braincells is staying online."
 
           while true; do
+
             if curl -fsS \
               --connect-timeout 3 \
               http://127.0.0.1:11434/api/tags \
-              >/dev/null; then
+              >/dev/null 2>&1; then
 
               echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ollama ONLINE | $TS_IP"
 
             else
+
               echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ollama OFFLINE"
+
               echo ""
-              echo "--- Ollama log ---"
-              tail -n 30 "$RUNNER_TEMP/ollama.log" || true
-              echo ""
+              echo "========== LAST OLLAMA LOG =========="
+
+              tail -n 40 "$RUNNER_TEMP/ollama.log" || true
             fi
 
             sleep 60
