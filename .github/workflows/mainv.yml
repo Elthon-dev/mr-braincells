@@ -1,0 +1,167 @@
+name: Mr. Braincells - AI Server
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ai-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+          fi
+
+      - name: Install Ollama
+        shell: bash
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama --version
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Configure Ollama
+        shell: bash
+        run: |
+          # Listen on the runner's network interfaces so the
+          # Tailscale interface can reach Ollama.
+          export OLLAMA_HOST="0.0.0.0:11434"
+
+          # Persist it for later workflow steps.
+          echo "OLLAMA_HOST=0.0.0.0:11434" >> "$GITHUB_ENV"
+
+          # Start Ollama manually because systemd is unavailable
+          # on GitHub-hosted runners.
+          nohup ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &
+
+          echo "Waiting for Ollama..."
+
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+              echo "Ollama is ONLINE."
+              break
+            fi
+
+            sleep 2
+          done
+
+          if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+            echo "Ollama failed to start."
+            cat "$RUNNER_TEMP/ollama.log"
+            exit 1
+          fi
+
+      - name: Pull Models
+        shell: bash
+        run: |
+          set -e
+
+          models=(
+            "llama3.2"
+            "mistral"
+            "deepseek-coder"
+            "phi"
+            "cogito"
+          )
+
+          for model in "${models[@]}"; do
+            echo "Pulling $model..."
+            ollama pull "$model"
+          done
+
+          echo ""
+          echo "========== INSTALLED MODELS =========="
+          ollama list
+
+      - name: Test Ollama
+        shell: bash
+        run: |
+          set -e
+
+          echo "Testing /api/generate..."
+
+          response="$(
+            curl -fsS http://127.0.0.1:11434/api/generate \
+              -H "Content-Type: application/json" \
+              -d '{
+                "model": "llama3.2",
+                "prompt": "Reply with exactly: Ollama is working.",
+                "stream": false
+              }'
+          )"
+
+          echo "Response:"
+          echo "$response"
+
+          echo ""
+          echo "Ollama API test PASSED."
+
+      - name: Print Connection Info
+        shell: bash
+        run: |
+          TS_IP="$(tailscale ip -4)"
+
+          echo ""
+          echo "=================================================="
+          echo "             MR. BRAINCELLS ONLINE"
+          echo "=================================================="
+          echo ""
+          echo "Tailscale IP:"
+          echo "$TS_IP"
+          echo ""
+          echo "Ollama base:"
+          echo "http://$TS_IP:11434"
+          echo ""
+          echo "Generate API:"
+          echo "http://$TS_IP:11434/api/generate"
+          echo ""
+          echo "Chat API:"
+          echo "http://$TS_IP:11434/api/chat"
+          echo ""
+          echo "Models:"
+          ollama list
+          echo ""
+          echo "IMPORTANT:"
+          echo "Keep this workflow RUNNING."
+          echo "The server disappears when the job ends."
+          echo ""
+          echo "=================================================="
+
+      - name: Keep Server Alive
+        shell: bash
+        run: |
+          echo "Mr. Braincells server is now staying alive."
+
+          while true; do
+            if curl -fsS \
+              http://127.0.0.1:11434/api/tags \
+              >/dev/null; then
+
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ollama: ONLINE"
+            else
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ollama: OFFLINE"
+
+              echo "--- Ollama log ---"
+              tail -n 30 "$RUNNER_TEMP/ollama.log" || true
+            fi
+
+            sleep 60
+          done
