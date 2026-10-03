@@ -1,0 +1,42 @@
+name: Setup Mr. Braincells Environment
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup environment
+        run: |
+          echo "=== Mr. Braincells Environment Setup ==="
+          echo "Installing dependencies..."
+          echo "Setting up Ollama..."
+          curl -fsSL https://ollama.com/install.sh | sh
+          echo "Starting Ollama..."
+          ollama serve &
+          sleep 10
+          echo "Pulling recommended models..."
+          ollama pull llama3.2 2>/dev/null || true
+          ollama pull mistral 2>/dev/null || true
+          ollama pull deepseek-coder 2>/dev/null || true
+          echo "=== Setup Complete ==="
+          echo "CLI: mr-braincells"
+          echo "Access via: ./mr-braincells"
+          echo "Ollama endpoint: http://localhost:11434"
+
+      - name: Print Connection Credentials
+        run: |
+          echo "================================================"
+          echo "MR. BRAINCELLS - CONNECTION CREDENTIALS"
+          echo "================================================"
+          echo "CLI Command: mr-braincells"
+          echo "Ollama API: http://localhost:11434/api/generate"
+          echo "Models available:"
+          ollama list 2>/dev/null || echo "Run 'ollama list' after setup"
+          echo "================================================"
