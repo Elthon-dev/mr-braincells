@@ -1,42 +1,183 @@
-name: Setup Mr. Braincells Environment
+name: AI RDP + Ollama
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
+  ai-rdp:
+    runs-on: windows-2022
+    timeout-minutes: 345
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
+      - name: Enable RDP
+        shell: powershell
         run: |
-          pip install -r requirements.txt
+          Write-Host "Enabling Remote Desktop..."
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 0
+
+      - name: Create RDP User
+        shell: powershell
+        run: |
+          $username = "aiuser"
+          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object {[char]$_})
+
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+
+          New-LocalUser `
+            -Name $username `
+            -Password $securePassword `
+            -AccountNeverExpires `
+            -PasswordNeverExpires
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $username
+
+          "RDP_USER=$username" | Out-File $env:GITHUB_ENV -Append
+          "RDP_PASSWORD=$password" | Out-File $env:GITHUB_ENV -Append
 
       - name: Install Ollama
+        shell: powershell
         run: |
-          curl -fsSL https://ollama.com/install.sh | sh
+          Write-Host "Installing Ollama..."
 
-      - name: Setup Ollama
-        run: |
-          ollama serve &
-          sleep 15
-          ollama pull llama3.2 2>/dev/null || true
-          ollama pull mistral 2>/dev/null || true
-          ollama pull deepseek-coder 2>/dev/null || true
-          ollama pull phi 2>/dev/null || true
-          ollama pull cogito 2>/dev/null || true
-          echo "--- MODELS ---"
-          ollama list
+          Invoke-WebRequest `
+            -Uri "https://ollama.com/download/OllamaSetup.exe" `
+            -OutFile "$env:TEMP\OllamaSetup.exe"
 
-      - name: Print Connection Credentials
+          Start-Process `
+            "$env:TEMP\OllamaSetup.exe" `
+            -ArgumentList "/VERYSILENT" `
+            -Wait
+
+      - name: Start Ollama
+        shell: powershell
         run: |
-          python3 scripts/print_creds.py
+          $ollama = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
+
+          if (!(Test-Path $ollama)) {
+            $ollama = "ollama"
+          }
+
+          Start-Process `
+            -FilePath $ollama `
+            -ArgumentList "serve" `
+            -WindowStyle Hidden
+
+          Write-Host "Waiting for Ollama..."
+
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              Invoke-WebRequest `
+                -Uri "http://127.0.0.1:11434/api/tags" `
+                -UseBasicParsing `
+                -ErrorAction Stop
+
+              Write-Host "Ollama is READY."
+              break
+            }
+            catch {
+              Start-Sleep -Seconds 2
+            }
+          }
+
+      - name: Pull AI Model
+        shell: powershell
+        run: |
+          $ollama = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
+
+          if (!(Test-Path $ollama)) {
+            $ollama = "ollama"
+          }
+
+          & $ollama pull llama3.2
+
+          Write-Host ""
+          Write-Host "========== MODELS =========="
+          & $ollama list
+
+      - name: Test Ollama
+        shell: powershell
+        run: |
+          $body = @{
+            model = "llama3.2"
+            prompt = "Say hello in one sentence."
+            stream = $false
+          } | ConvertTo-Json
+
+          $response = Invoke-RestMethod `
+            -Uri "http://127.0.0.1:11434/api/generate" `
+            -Method Post `
+            -ContentType "application/json" `
+            -Body $body
+
+          Write-Host "AI RESPONSE:"
+          Write-Host $response.response
+
+      - name: Show Connection Information
+        shell: powershell
+        run: |
+          $ip = (Get-NetIPAddress -AddressFamily IPv4 |
+            Where-Object {
+              $_.IPAddress -notlike "127.*" -and
+              $_.IPAddress -notlike "169.254.*"
+            } |
+            Select-Object -First 1).IPAddress
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "        AI RDP RUNNER READY"
+          Write-Host "=========================================="
+          Write-Host ""
+          Write-Host "RDP USER:"
+          Write-Host $env:RDP_USER
+          Write-Host ""
+          Write-Host "RDP PASSWORD:"
+          Write-Host $env:RDP_PASSWORD
+          Write-Host ""
+          Write-Host "RUNNER IP:"
+          Write-Host $ip
+          Write-Host ""
+          Write-Host "OLLAMA:"
+          Write-Host "http://127.0.0.1:11434"
+          Write-Host ""
+          Write-Host "OLLAMA API:"
+          Write-Host "http://127.0.0.1:11434/api"
+          Write-Host ""
+          Write-Host "MODEL:"
+          Write-Host "llama3.2"
+          Write-Host ""
+          Write-Host "=========================================="
+
+      - name: Keep AI Alive
+        shell: powershell
+        run: |
+          Write-Host "AI runner is staying alive..."
+          Write-Host "Press Ctrl+C only if you want to stop it."
+
+          while ($true) {
+            try {
+              $status = Invoke-WebRequest `
+                -Uri "http://127.0.0.1:11434/api/tags" `
+                -UseBasicParsing `
+                -TimeoutSec 5
+
+              Write-Host "$(Get-Date) - Ollama alive"
+            }
+            catch {
+              Write-Host "$(Get-Date) - Ollama check failed"
+            }
+
+            Start-Sleep -Seconds 60
+          }
