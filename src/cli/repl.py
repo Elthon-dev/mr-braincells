@@ -1,7 +1,6 @@
 """Interactive REPL with aesthetic UI"""
 from rich.console import Console
 from rich.prompt import Prompt
-from rich.syntax import Syntax
 from rich.panel import Panel
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style
@@ -15,10 +14,16 @@ style = Style.from_dict({
 
 class REPL:
     def __init__(self):
-        self.session = PromptSession()
+        try:
+            self.session = PromptSession()
+        except Exception:
+            self.session = None
 
     def run(self):
         console.print(Panel("Mr. Braincells CLI Ready", style="bold cyan"))
+        if self.session is None:
+            print("Non-interactive mode. Exiting.")
+            return
         while True:
             try:
                 cmd = self.session.prompt("mr-braincells> ", style=style)
@@ -26,10 +31,10 @@ class REPL:
                     break
                 elif cmd.lower() == 'help':
                     self.show_help()
-                else:
-                    console.print(f"[dim]Thinking...[/dim]")
+                elif cmd:
+                    console.print(f"[dim]Thinking... (human-like step)[/dim]")
                     console.print(f"[green]→[/green] {cmd}")
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, EOFError):
                 break
             except Exception as e:
                 console.print(f"[red]Error:[/red] {e}")
@@ -38,7 +43,7 @@ class REPL:
         help_text = """
 [bold]Commands:[/bold]
   help           Show this help
-  sessions       Manage sessions
+  sessions       Manage sessions (create/delete/select/list)
   agents         Show deployed agents
   plan           Plan a task
   web            Search web
