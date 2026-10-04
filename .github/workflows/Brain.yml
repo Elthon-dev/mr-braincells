@@ -12,199 +12,51 @@ jobs:
     timeout-minutes: 350
 
     env:
-      # Local model used by the server. (Llama 3.1 8B Abliterated Q4_K_M for 8GB RAM)
-      OLLAMA_MODEL: hf.co/bartowski/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF:Q4_K_M
+      # Exact Hugging Face -> Ollama model
+      OLLAMA_MODEL: "hf.co/bartowski/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF:Q4_K_M"
 
-      # Keep Ollama itself bound to localhost.
-      # Tailscale Serve handles tailnet access.
       OLLAMA_HOST: "127.0.0.1:11434"
-
-      # Resource / stability tuning for a CPU-only hosted runner.
       OLLAMA_CONTEXT_LENGTH: "4096"
       OLLAMA_NUM_PARALLEL: "1"
       OLLAMA_MAX_LOADED_MODELS: "1"
       OLLAMA_MAX_QUEUE: "4"
-
-      # Keep the loaded model resident.
       OLLAMA_KEEP_ALIVE: "-1"
-
-      # Give slow model loads more room.
       OLLAMA_LOAD_TIMEOUT: "10m"
-
-      # Keep this local-only server from using Ollama cloud features.
       OLLAMA_NO_CLOUD: "1"
 
     steps:
-
-      # ------------------------------------------------------------
-      # 1. CHECKOUT
-      # ------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      # ------------------------------------------------------------
-      # 2. PYTHON
-      # ------------------------------------------------------------
-      - name: Setup Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-
-      # ------------------------------------------------------------
-      # 3. PYTHON DEPENDENCIES
-      # ------------------------------------------------------------
-      - name: Install Python dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python -m pip install --upgrade pip
-
-          if [ -f requirements.txt ]; then
-            python -m pip install -r requirements.txt
-          else
-            echo "No requirements.txt found; continuing."
-          fi
-
-          echo ""
-          echo "Python:"
-          python --version
-
-          echo ""
-          echo "pip:"
-          python -m pip --version
-
-      # ------------------------------------------------------------
-      # 4. INSTALL OLLAMA
-      # ------------------------------------------------------------
       - name: Install Ollama
-        shell: bash
         run: |
-          set -euo pipefail
-
-          echo "Installing Ollama..."
-
           curl -fsSL https://ollama.com/install.sh | sh
 
-          echo ""
-          echo "========== OLLAMA BINARY =========="
-          command -v ollama
-
-          echo ""
-          echo "========== OLLAMA VERSION =========="
-          ollama --version || true
-
-      # ------------------------------------------------------------
-      # 5. STOP INSTALLER-CREATED SYSTEMD OLLAMA
-      #
-      # The official installer creates and starts ollama.service.
-      # We want one manually-controlled instance instead.
-      # ------------------------------------------------------------
-      - name: Disable installer Ollama service
-        shell: bash
+      - name: Stop system Ollama service
         run: |
-          set +e
+          sudo systemctl stop ollama.service || true
+          sudo systemctl disable ollama.service || true
+          sudo systemctl mask ollama.service || true
 
-          echo "Stopping installer-created Ollama service..."
-
-          sudo systemctl stop ollama.service 2>/dev/null
-          sudo systemctl disable ollama.service 2>/dev/null
-          sudo systemctl mask ollama.service 2>/dev/null
-
-          echo ""
-          echo "Stopping any remaining Ollama server..."
-          sudo pkill -f '[o]llama serve' 2>/dev/null
-
-          sleep 2
-
-          echo ""
-          echo "========== OLLAMA PROCESSES =========="
-          pgrep -a ollama || true
-          pgrep -a llama-server || true
-
-          echo ""
-          echo "========== PORT 11434 =========="
-          sudo ss -lntp | grep ':11434' || true
-
-      # ------------------------------------------------------------
-      # 6. CONNECT TAILSCALE
-      # ------------------------------------------------------------
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
-          version: "latest"
-          use-cache: true
-          log-mode: grouped
 
-      # ------------------------------------------------------------
-      # 7. GET TAILSCALE IP
-      # ------------------------------------------------------------
-      - name: Get Tailscale address
-        shell: bash
+      - name: Get Tailscale IP
+        id: tailscale-ip
         run: |
-          set -euo pipefail
-
-          echo "Waiting for Tailscale IPv4 address..."
-
-          TS_IP=""
-
-          for i in {1..30}; do
-            TS_IP="$(tailscale ip -4 2>/dev/null || true)"
-
-            if [ -n "$TS_IP" ]; then
-              break
-            fi
-
-            sleep 2
-          done
+          TS_IP="$(tailscale ip -4 | head -n1)"
 
           if [ -z "$TS_IP" ]; then
-            echo ""
-            echo "ERROR: Tailscale IPv4 address was not assigned."
-            echo ""
-            tailscale status || true
+            echo "ERROR: Could not get Tailscale IPv4"
             exit 1
           fi
 
-          echo ""
+          echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
           echo "Tailscale IP: $TS_IP"
 
-          # Persist for later steps.
-          echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
-
-      # ------------------------------------------------------------
-      # 8. VERIFY TAILSCALE CONNECTION
-      # ------------------------------------------------------------
-      - name: Verify Tailscale
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "========== TAILSCALE STATUS =========="
-          tailscale status
-
-          echo ""
-          echo "========== TAILSCALE IP =========="
-          tailscale ip -4
-
-      # ------------------------------------------------------------
-      # 9. START OLLAMA MANUALLY
-      # ------------------------------------------------------------
       - name: Start Ollama
-        shell: bash
         run: |
-          set -euo pipefail
-
-          echo "Starting Ollama manually..."
-
-          # Extra safety: make sure the port is actually free.
-          if sudo ss -lntp | grep -q ':11434'; then
-            echo ""
-            echo "ERROR: Port 11434 is already occupied."
-            sudo ss -lntp | grep ':11434' || true
-            exit 1
-          fi
+          echo "Starting Ollama..."
+          echo "Model: $OLLAMA_MODEL"
 
           nohup env \
             OLLAMA_HOST="$OLLAMA_HOST" \
@@ -216,443 +68,229 @@ jobs:
             OLLAMA_LOAD_TIMEOUT="$OLLAMA_LOAD_TIMEOUT" \
             OLLAMA_NO_CLOUD="$OLLAMA_NO_CLOUD" \
             ollama serve \
-            > "$RUNNER_TEMP/ollama.log" 2>&1 &
+            > "$HOME/ollama.log" 2>&1 &
 
-          OLLAMA_PID=$!
+          echo "OLLAMA_PID=$!" >> "$GITHUB_ENV"
 
-          echo "Ollama PID: $OLLAMA_PID"
-
-          echo "$OLLAMA_PID" > "$RUNNER_TEMP/ollama.pid"
-
-          echo ""
+      - name: Wait for Ollama
+        run: |
           echo "Waiting for Ollama API..."
 
-          READY="false"
-
-          for i in {1..60}; do
-
-            if ! kill -0 "$OLLAMA_PID" 2>/dev/null; then
-              echo ""
-              echo "ERROR: Ollama process exited during startup."
-
-              echo ""
-              echo "========== OLLAMA LOG =========="
-              cat "$RUNNER_TEMP/ollama.log" || true
-
-              exit 1
+          for i in {1..120}; do
+            if curl -fsS \
+              "http://127.0.0.1:11434/api/tags" \
+              >/dev/null 2>&1; then
+              echo "Ollama is online."
+              break
             fi
 
-            if curl -fsS \
-              --connect-timeout 3 \
-              http://127.0.0.1:11434/api/tags \
-              >/dev/null 2>&1; then
-
-              READY="true"
-
-              echo "Ollama is ONLINE."
-              break
+            if [ "$i" -eq 120 ]; then
+              echo "ERROR: Ollama failed to start."
+              echo "===== Ollama log ====="
+              cat "$HOME/ollama.log" || true
+              exit 1
             fi
 
             sleep 2
           done
 
-          if [ "$READY" != "true" ]; then
-            echo ""
-            echo "ERROR: Ollama did not become ready."
-
-            echo ""
-            echo "========== PROCESS =========="
-            ps -p "$OLLAMA_PID" -o pid,ppid,stat,etime,cmd || true
-
-            echo ""
-            echo "========== SOCKET =========="
-            ss -lntp | grep ':11434' || true
-
-            echo ""
-            echo "========== OLLAMA LOG =========="
-            cat "$RUNNER_TEMP/ollama.log" || true
-
-            exit 1
-          fi
-
-          echo ""
-          echo "========== SOCKET =========="
-          ss -lntp | grep ':11434' || true
-
-          echo ""
-          echo "========== LOCAL API =========="
-          curl -fsS http://127.0.0.1:11434/api/tags
-
-          echo ""
-
-      # ------------------------------------------------------------
-      # 10. PULL MODEL
-      # ------------------------------------------------------------
-      - name: Pull model
-        shell: bash
+      - name: Pull Abliterated model
         run: |
-          set -euo pipefail
-
-          echo "Pulling $OLLAMA_MODEL..."
+          echo "Pulling:"
+          echo "$OLLAMA_MODEL"
 
           ollama pull "$OLLAMA_MODEL"
 
-          echo ""
-          echo "========== INSTALLED MODELS =========="
-
+      - name: Verify installed model
+        run: |
+          echo "===== Ollama models ====="
           ollama list
 
-      # ------------------------------------------------------------
-      # 11. VERIFY MODEL EXISTS
-      # ------------------------------------------------------------
-      - name: Verify installed model
-        shell: bash
+          echo
+          echo "===== API tags ====="
+          curl -fsS \
+            "http://127.0.0.1:11434/api/tags" | python3 -m json.tool
+
+          echo
+          echo "Checking exact model name..."
+
+          curl -fsS \
+            "http://127.0.0.1:11434/api/tags" \
+            | python3 -c '
+          import json
+          import sys
+
+          wanted = sys.argv[1]
+          data = json.load(sys.stdin)
+
+          names = [m.get("name", "") for m in data.get("models", [])]
+
+          print("Installed models:")
+          for name in names:
+              print(" -", name)
+
+          if wanted not in names:
+              print()
+              print("ERROR: Exact model was not found.")
+              print("Wanted:", wanted)
+              sys.exit(1)
+
+          print()
+          print("Exact model found:", wanted)
+          ' "$OLLAMA_MODEL"
+
+      - name: Test Ollama generate API
         run: |
-          set -euo pipefail
+          echo "Testing /api/generate..."
 
-          echo "Checking for model: $OLLAMA_MODEL"
+          curl -fsS \
+            "http://127.0.0.1:11434/api/generate" \
+            -H "Content-Type: application/json" \
+            -d "$(python3 - <<'PY'
+          import json
+          import os
 
-          MODELS_JSON="$(
-            curl -fsS \
-              --connect-timeout 10 \
-              http://127.0.0.1:11434/api/tags
-          )"
+          print(json.dumps({
+              "model": os.environ["OLLAMA_MODEL"],
+              "prompt": "Reply with exactly: Braincells online.",
+              "stream": False
+          }))
+          PY
+          )" | python3 -m json.tool
 
-          echo ""
-          echo "========== MODEL API =========="
-          echo "$MODELS_JSON"
-
-          if ! echo "$MODELS_JSON" | grep -q "$OLLAMA_MODEL"; then
-            echo ""
-            echo "ERROR: Expected model was not found."
-            exit 1
-          fi
-
-          echo ""
-          echo "Model verification PASSED."
-
-      # ------------------------------------------------------------
-      # 12. TEST MODEL GENERATION
-      # ------------------------------------------------------------
-      - name: Test model generation
-        shell: bash
+      - name: Test Ollama chat API
         run: |
-          set -euo pipefail
+          echo "Testing /api/chat..."
 
-          echo "Testing model generation..."
+          curl -fsS \
+            "http://127.0.0.1:11434/api/chat" \
+            -H "Content-Type: application/json" \
+            -d "$(python3 - <<'PY'
+          import json
+          import os
 
-          RESPONSE="$(
-            curl -fsS \
-              --connect-timeout 10 \
-              --max-time 300 \
-              http://127.0.0.1:11434/api/generate \
-              -H "Content-Type: application/json" \
-              -d '{
-                "model": "'"$OLLAMA_MODEL"'",
-                "prompt": "Reply with exactly: Braincells online.",
-                "stream": false
-              }'
-          )"
+          print(json.dumps({
+              "model": os.environ["OLLAMA_MODEL"],
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": "Reply with exactly: Braincells online."
+                  }
+              ],
+              "stream": False
+          }))
+          PY
+          )" | python3 -m json.tool
 
-          echo ""
-          echo "========== MODEL RESPONSE =========="
-          echo "$RESPONSE"
-
-          echo ""
-          echo "Model test PASSED."
-
-      # ------------------------------------------------------------
-      # 13. SET TAILSCALE OPERATOR
-      #
-      # This removes the permission problem for the normal runner
-      # user when managing Serve configuration.
-      # ------------------------------------------------------------
       - name: Configure Tailscale operator
-        shell: bash
         run: |
-          set -euo pipefail
+          sudo tailscale set --operator="$USER" || true
 
-          echo "Assigning current GitHub runner user as Tailscale operator..."
-
-          sudo tailscale set --operator="$USER"
-
-          echo ""
-          echo "Tailscale operator configured."
-
-      # ------------------------------------------------------------
-      # 14. CONFIGURE TAILSCALE SERVE
-      #
-      # Ollama remains localhost-only.
-      # Tailscale forwards tailnet traffic to it.
-      # ------------------------------------------------------------
       - name: Configure Tailscale Serve
-        shell: bash
         run: |
-          set -euo pipefail
+          echo "Starting Tailscale Serve on TCP 11434..."
 
-          echo "Resetting previous Serve configuration..."
-
-          tailscale serve reset 2>/dev/null || \
-          sudo tailscale serve reset 2>/dev/null || \
-          true
-
-          echo ""
-          echo "Creating TCP forwarding..."
-
-          if tailscale serve \
+          tailscale serve \
             --bg \
             --tcp=11434 \
-            tcp://127.0.0.1:11434; then
-
-            echo "Tailscale Serve configured as normal user."
-
-          else
-
-            echo ""
-            echo "Normal-user Serve failed; retrying with sudo..."
-
-            sudo tailscale serve \
+            tcp://127.0.0.1:11434 \
+            || sudo tailscale serve \
               --bg \
               --tcp=11434 \
               tcp://127.0.0.1:11434
 
-          fi
+          echo
+          echo "===== Tailscale Serve status ====="
+          tailscale serve status || sudo tailscale serve status
 
-          echo ""
-          echo "========== SERVE STATUS =========="
-
-          tailscale serve status || \
-          sudo tailscale serve status
-
-      # ------------------------------------------------------------
-      # 15. VERIFY SERVE CONFIGURATION
-      # ------------------------------------------------------------
       - name: Verify Tailscale Serve
-        shell: bash
         run: |
-          set -euo pipefail
-
           echo "Checking Tailscale Serve configuration..."
 
-          STATUS="$(
-            tailscale serve status 2>&1
-          )"
-
-          echo "$STATUS"
-
-          if ! echo "$STATUS" | grep -q "11434"; then
-
-            echo ""
-            echo "Normal-user status lookup failed or port missing."
-            echo "Retrying with sudo..."
-
-            STATUS="$(
-              sudo tailscale serve status 2>&1
-            )"
-
-            echo "$STATUS"
-          fi
-
-          if ! echo "$STATUS" | grep -q "11434"; then
-            echo ""
-            echo "ERROR: Tailscale Serve does not contain port 11434."
+          if ! tailscale serve status | grep -q "11434" \
+             && ! sudo tailscale serve status | grep -q "11434"; then
+            echo "ERROR: Tailscale Serve is not exposing port 11434."
             exit 1
           fi
 
-          echo ""
-          echo "Tailscale Serve configuration PASSED."
+          echo "Tailscale Serve is exposing port 11434."
 
-      # ------------------------------------------------------------
-      # 16. TEST ACCESS THROUGH TAILSCALE
-      #
-      # This tests the actual tailnet-facing path rather than
-      # merely checking the Serve configuration.
-      # ------------------------------------------------------------
-      - name: Verify tailnet to Ollama path
-        shell: bash
+      - name: Test tailnet Ollama API
         run: |
-          set -euo pipefail
+          echo "Testing:"
+          echo "http://$TS_IP:11434/api/tags"
 
-          echo "Testing Ollama through Tailscale IP..."
+          curl -fsS \
+            "http://$TS_IP:11434/api/tags" \
+            | python3 -m json.tool
 
-          REMOTE_OK="false"
-
-          for i in {1..20}; do
-
-            if curl -fsS \
-              --connect-timeout 3 \
-              --max-time 10 \
-              "http://$TS_IP:11434/api/tags" \
-              >/tmp/tailscale-ollama.json 2>/tmp/tailscale-ollama.err; then
-
-              REMOTE_OK="true"
-              break
-            fi
-
-            echo "Attempt $i/20 failed; retrying..."
-            sleep 3
-          done
-
-          if [ "$REMOTE_OK" != "true" ]; then
-
-            echo ""
-            echo "WARNING: Tailnet-side HTTP check did not succeed."
-
-            echo ""
-            echo "========== CURL ERROR =========="
-            cat /tmp/tailscale-ollama.err || true
-
-            echo ""
-            echo "========== SERVE STATUS =========="
-            tailscale serve status || \
-            sudo tailscale serve status || \
-            true
-
-            echo ""
-            echo "========== TAILSCALE STATUS =========="
-            tailscale status || true
-
-            echo ""
-            echo "========== LOCAL API =========="
-            curl -fsS \
-              http://127.0.0.1:11434/api/tags || true
-
-            echo ""
-            echo ""
-            echo "The local Ollama server is healthy, but the tailnet path"
-            echo "could not be verified from the runner itself."
-
-            exit 1
-          fi
-
-          echo ""
-          echo "========== TAILNET API RESPONSE =========="
-          cat /tmp/tailscale-ollama.json
-
-          echo ""
-          echo "Tailnet → Ollama path PASSED."
-
-      # ------------------------------------------------------------
-      # 17. PRINT CONNECTION INFO
-      # ------------------------------------------------------------
-      - name: Print connection information
-        shell: bash
+      - name: Test tailnet chat
         run: |
-          set -euo pipefail
+          echo "Testing /api/chat through Tailscale..."
 
-          echo ""
-          echo "=========================================================="
-          echo "                 MR. BRAINCELLS ONLINE"
-          echo "=========================================================="
-          echo ""
-          echo "Tailscale IP:"
-          echo "$TS_IP"
-          echo ""
-          echo "Ollama endpoint:"
-          echo "http://$TS_IP:11434"
-          echo ""
-          echo "Generate API:"
-          echo "http://$TS_IP:11434/api/generate"
-          echo ""
-          echo "Chat API:"
-          echo "http://$TS_IP:11434/api/chat"
-          echo ""
+          curl -fsS \
+            "http://$TS_IP:11434/api/chat" \
+            -H "Content-Type: application/json" \
+            -d "$(python3 - <<'PY'
+          import json
+          import os
+
+          print(json.dumps({
+              "model": os.environ["OLLAMA_MODEL"],
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": "Reply with exactly: Braincells online."
+                  }
+              ],
+              "stream": False
+          }))
+          PY
+          )" | python3 -m json.tool
+
+      - name: Print connection info
+        run: |
+          echo
+          echo "=========================================="
+          echo "       MR. BRAINCELLS ONLINE"
+          echo "=========================================="
+          echo
           echo "Model:"
           echo "$OLLAMA_MODEL"
-          echo ""
-          echo "Installed models:"
-          ollama list
-          echo ""
-          echo "Ollama local status:"
-          curl -fsS http://127.0.0.1:11434/api/tags
-          echo ""
-          echo ""
-          echo "=========================================================="
-          echo "                   SERVER IS READY"
-          echo "=========================================================="
-          echo ""
-          echo "Keep this workflow running."
-          echo "The server exists only while this GitHub job is running."
-          echo ""
+          echo
+          echo "Endpoint:"
+          echo "http://$TS_IP:11434"
+          echo
+          echo "API:"
+          echo "http://$TS_IP:11434/api/generate"
+          echo "http://$TS_IP:11434/api/chat"
+          echo
+          echo "Tailscale IP:"
+          echo "$TS_IP"
+          echo
+          echo "=========================================="
 
-      # ------------------------------------------------------------
-      # 18. KEEP SERVER ALIVE
-      #
-      # Don't just sleep blindly. Monitor both Ollama and
-      # Tailscale Serve so failures become visible in the log.
-      # ------------------------------------------------------------
       - name: Keep server alive
-        shell: bash
         run: |
-          set -u
-
-          echo "Mr. Braincells is staying online."
+          echo "Server staying alive..."
 
           while true; do
-
-            TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
-
-            OLLAMA_OK="false"
-            SERVE_OK="false"
-
-            # Check Ollama process.
-            if [ -f "$RUNNER_TEMP/ollama.pid" ]; then
-              OLLAMA_PID="$(cat "$RUNNER_TEMP/ollama.pid")"
-
-              if kill -0 "$OLLAMA_PID" 2>/dev/null; then
-                OLLAMA_OK="true"
-              fi
-            fi
-
-            # Check Ollama HTTP API.
-            if curl -fsS \
-              --connect-timeout 3 \
-              http://127.0.0.1:11434/api/tags \
+            if ! curl -fsS \
+              "http://127.0.0.1:11434/api/tags" \
               >/dev/null 2>&1; then
 
-              OLLAMA_OK="true"
-            fi
-
-            # Check Serve configuration.
-            if tailscale serve status 2>/dev/null | grep -q "11434"; then
-              SERVE_OK="true"
-            elif sudo tailscale serve status 2>/dev/null | grep -q "11434"; then
-              SERVE_OK="true"
-            fi
-
-            if [ "$OLLAMA_OK" = "true" ] && [ "$SERVE_OK" = "true" ]; then
-
-              echo "[$TIMESTAMP] Ollama ONLINE | Serve ONLINE | $TS_IP"
-
-            else
-
-              echo "[$TIMESTAMP] WARNING:"
-
-              echo "  Ollama: $OLLAMA_OK"
-              echo "  Serve:  $SERVE_OK"
-
-              echo ""
-              echo "========== OLLAMA PROCESSES =========="
-              pgrep -a ollama || true
-              pgrep -a llama-server || true
-
-              echo ""
-              echo "========== PORT 11434 =========="
-              ss -lntp | grep ':11434' || true
-
-              echo ""
-              echo "========== SERVE STATUS =========="
-              tailscale serve status 2>&1 || \
-              sudo tailscale serve status 2>&1 || \
-              true
-
-              echo ""
-              echo "========== LAST OLLAMA LOG =========="
-              tail -n 80 "$RUNNER_TEMP/ollama.log" || true
-
-              # Fail instead of silently pretending the server is healthy.
+              echo "WARNING: Ollama API stopped."
+              echo "===== Ollama log ====="
+              tail -n 100 "$HOME/ollama.log" || true
               exit 1
             fi
 
+            if ! tailscale serve status 2>/dev/null | grep -q "11434" \
+               && ! sudo tailscale serve status 2>/dev/null | grep -q "11434"; then
+              echo "WARNING: Tailscale Serve stopped."
+              exit 1
+            fi
+
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ollama + Tailscale OK"
             sleep 60
           done
