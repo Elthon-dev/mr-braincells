@@ -12,8 +12,8 @@ jobs:
     timeout-minutes: 350
 
     env:
-      # Local model used by the server.
-      OLLAMA_MODEL: qwen3:4b
+      # Local model used by the server. (Llama 3.1 8B Abliterated Q4_K_M for 8GB RAM)
+      OLLAMA_MODEL: hf.co/bartowski/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF:Q4_K_M
 
       # Keep Ollama itself bound to localhost.
       # Tailscale Serve handles tailnet access.
@@ -348,7 +348,7 @@ jobs:
               http://127.0.0.1:11434/api/generate \
               -H "Content-Type: application/json" \
               -d '{
-                "model": "qwen3:4b",
+                "model": "'"$OLLAMA_MODEL"'",
                 "prompt": "Reply with exactly: Braincells online.",
                 "stream": false
               }'
