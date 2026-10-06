@@ -1,4 +1,4 @@
-name: Mr. Braincells - AI Server
+name: Mr. Braincells - Hungry Gemma 4 Server
 
 on:
   workflow_dispatch:
@@ -9,54 +9,190 @@ permissions:
 jobs:
   braincells:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+
+    # This is ONLY GitHub's maximum lifetime for the whole job.
+    # It does NOT impose an Ollama generation timeout.
+    timeout-minutes: 360
 
     env:
-      # Exact Hugging Face -> Ollama model
-      OLLAMA_MODEL: "hf.co/bartowski/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF:Q4_K_M"
+      # ==========================================================
+      # MODEL
+      # ==========================================================
+
+      OLLAMA_MODEL: "gemma4:12b"
+
+      # ==========================================================
+      # SERVER
+      # ==========================================================
 
       OLLAMA_HOST: "127.0.0.1:11434"
-      OLLAMA_CONTEXT_LENGTH: "4096"
+
+      # Bigger context = more capability.
+      # 16K is deliberately chosen for the 16 GB public runner.
+      OLLAMA_CONTEXT_LENGTH: "16384"
+
+      # Give one active generation the whole machine.
       OLLAMA_NUM_PARALLEL: "1"
+
+      # Never keep competing models resident.
       OLLAMA_MAX_LOADED_MODELS: "1"
+
+      # Allow a few queued requests without going crazy.
       OLLAMA_MAX_QUEUE: "4"
+
+      # Keep the model resident indefinitely.
       OLLAMA_KEEP_ALIVE: "-1"
-      OLLAMA_LOAD_TIMEOUT: "10m"
+
+      # Use Flash Attention when supported.
+      # Ollama automatically handles unsupported backends.
+      OLLAMA_FLASH_ATTENTION: "1"
+
+      # Quantized KV cache to reduce memory pressure while
+      # retaining most of the quality of FP16 KV cache.
+      OLLAMA_KV_CACHE_TYPE: "q8_0"
+
+      # Stay completely local.
       OLLAMA_NO_CLOUD: "1"
 
     steps:
+
+      # ==========================================================
+      # INSTALL OLLAMA
+      # ==========================================================
+
       - name: Install Ollama
+        shell: bash
         run: |
+          set -euo pipefail
+
+          echo "Installing Ollama..."
+
           curl -fsSL https://ollama.com/install.sh | sh
 
+          echo
+          echo "===== Ollama version ====="
+          ollama --version
+
+      # ==========================================================
+      # STOP SYSTEM OLLAMA
+      # ==========================================================
+
       - name: Stop system Ollama service
+        shell: bash
         run: |
           sudo systemctl stop ollama.service || true
           sudo systemctl disable ollama.service || true
           sudo systemctl mask ollama.service || true
+
+      # ==========================================================
+      # INSPECT THE ACTUAL RUNNER
+      # ==========================================================
+
+      - name: Inspect runner resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo
+          echo "=========================================="
+          echo "          RUNNER RESOURCES"
+          echo "=========================================="
+
+          echo
+          echo "CPU:"
+          nproc
+
+          echo
+          echo "RAM:"
+          free -h
+
+          echo
+          echo "Detailed memory:"
+          awk '
+            /MemTotal/ {
+              printf "Total RAM: %.2f GiB\n", $2 / 1024 / 1024
+            }
+            /MemAvailable/ {
+              printf "Available RAM: %.2f GiB\n", $2 / 1024 / 1024
+            }
+          ' /proc/meminfo
+
+          echo
+          echo "Disk:"
+          df -h /
+
+          echo
+          echo "=========================================="
+
+      # ==========================================================
+      # CONNECT TAILSCALE
+      # ==========================================================
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
+      # ==========================================================
+      # GET TAILSCALE IP
+      # ==========================================================
+
       - name: Get Tailscale IP
         id: tailscale-ip
+        shell: bash
         run: |
+          set -euo pipefail
+
           TS_IP="$(tailscale ip -4 | head -n1)"
 
           if [ -z "$TS_IP" ]; then
-            echo "ERROR: Could not get Tailscale IPv4"
+            echo "ERROR: Could not get Tailscale IPv4."
             exit 1
           fi
 
           echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
-          echo "Tailscale IP: $TS_IP"
+
+          echo
+          echo "Tailscale IPv4:"
+          echo "$TS_IP"
+
+      # ==========================================================
+      # START OLLAMA
+      # ==========================================================
 
       - name: Start Ollama
+        shell: bash
         run: |
-          echo "Starting Ollama..."
-          echo "Model: $OLLAMA_MODEL"
+          set -euo pipefail
+
+          echo
+          echo "=========================================="
+          echo "        STARTING MR. BRAINCELLS"
+          echo "=========================================="
+
+          echo
+          echo "Model:"
+          echo "$OLLAMA_MODEL"
+
+          echo
+          echo "Context:"
+          echo "$OLLAMA_CONTEXT_LENGTH"
+
+          echo
+          echo "Parallel:"
+          echo "$OLLAMA_NUM_PARALLEL"
+
+          echo
+          echo "Keep alive:"
+          echo "$OLLAMA_KEEP_ALIVE"
+
+          echo
+          echo "Flash Attention:"
+          echo "$OLLAMA_FLASH_ATTENTION"
+
+          echo
+          echo "KV cache:"
+          echo "$OLLAMA_KV_CACHE_TYPE"
 
           nohup env \
             OLLAMA_HOST="$OLLAMA_HOST" \
@@ -65,67 +201,114 @@ jobs:
             OLLAMA_MAX_LOADED_MODELS="$OLLAMA_MAX_LOADED_MODELS" \
             OLLAMA_MAX_QUEUE="$OLLAMA_MAX_QUEUE" \
             OLLAMA_KEEP_ALIVE="$OLLAMA_KEEP_ALIVE" \
-            OLLAMA_LOAD_TIMEOUT="$OLLAMA_LOAD_TIMEOUT" \
+            OLLAMA_FLASH_ATTENTION="$OLLAMA_FLASH_ATTENTION" \
+            OLLAMA_KV_CACHE_TYPE="$OLLAMA_KV_CACHE_TYPE" \
             OLLAMA_NO_CLOUD="$OLLAMA_NO_CLOUD" \
             ollama serve \
             > "$HOME/ollama.log" 2>&1 &
 
           echo "OLLAMA_PID=$!" >> "$GITHUB_ENV"
 
-      - name: Wait for Ollama
+          echo
+          echo "Ollama PID:"
+          echo "$!"
+
+      # ==========================================================
+      # WAIT FOR API
+      # ==========================================================
+
+      - name: Wait for Ollama API
+        shell: bash
         run: |
+          set -euo pipefail
+
+          echo
           echo "Waiting for Ollama API..."
 
-          for i in {1..120}; do
+          # NO RESPONSE TIME WALL.
+          # This simply waits until the server naturally becomes ready.
+          while true; do
+
             if curl -fsS \
               "http://127.0.0.1:11434/api/tags" \
               >/dev/null 2>&1; then
-              echo "Ollama is online."
-              break
-            fi
 
-            if [ "$i" -eq 120 ]; then
-              echo "ERROR: Ollama failed to start."
-              echo "===== Ollama log ====="
-              cat "$HOME/ollama.log" || true
-              exit 1
+              echo "Ollama API is online."
+              break
             fi
 
             sleep 2
           done
 
-      - name: Pull Abliterated model
+      # ==========================================================
+      # PULL GEMMA 4
+      # ==========================================================
+
+      - name: Pull Gemma 4 12B
+        shell: bash
         run: |
-          echo "Pulling:"
+          set -euo pipefail
+
+          echo
+          echo "=========================================="
+          echo "           PULLING GEMMA 4 12B"
+          echo "=========================================="
+
+          echo
+          echo "Model:"
           echo "$OLLAMA_MODEL"
 
           ollama pull "$OLLAMA_MODEL"
 
+      # ==========================================================
+      # VERIFY MODEL
+      # ==========================================================
+
       - name: Verify installed model
+        shell: bash
         run: |
+          set -euo pipefail
+
+          echo
           echo "===== Ollama models ====="
+
           ollama list
 
           echo
           echo "===== API tags ====="
-          curl -fsS \
-            "http://127.0.0.1:11434/api/tags" | python3 -m json.tool
-
-          echo
-          echo "Checking exact model name..."
 
           curl -fsS \
             "http://127.0.0.1:11434/api/tags" \
-            | python3 -c '
+            | python3 -m json.tool
+
+          echo
+          echo "===== Exact model verification ====="
+
+          python3 - "$OLLAMA_MODEL" <<'PY'
           import json
+          import subprocess
           import sys
 
           wanted = sys.argv[1]
-          data = json.load(sys.stdin)
 
-          names = [m.get("name", "") for m in data.get("models", [])]
+          raw = subprocess.check_output(
+              [
+                  "curl",
+                  "-fsS",
+                  "http://127.0.0.1:11434/api/tags",
+              ],
+              text=True,
+          )
+
+          data = json.loads(raw)
+
+          names = [
+              model.get("name", "")
+              for model in data.get("models", [])
+          ]
 
           print("Installed models:")
+
           for name in names:
               print(" -", name)
 
@@ -137,29 +320,65 @@ jobs:
 
           print()
           print("Exact model found:", wanted)
-          ' "$OLLAMA_MODEL"
+          PY
 
-      - name: Test Ollama generate API
+      # ==========================================================
+      # PREWARM MODEL
+      # ==========================================================
+
+      - name: Prewarm Gemma 4
+        shell: bash
         run: |
-          echo "Testing /api/generate..."
+          set -euo pipefail
+
+          echo
+          echo "=========================================="
+          echo "            PREWARMING MODEL"
+          echo "=========================================="
+
+          # Load Gemma into memory BEFORE the public endpoint
+          # is announced, eliminating the cold-start penalty
+          # for the first real request.
 
           curl -fsS \
-            "http://127.0.0.1:11434/api/generate" \
+            "http://127.0.0.1:11434/api/chat" \
             -H "Content-Type: application/json" \
             -d "$(python3 - <<'PY'
           import json
           import os
 
-          print(json.dumps({
+          payload = {
               "model": os.environ["OLLAMA_MODEL"],
-              "prompt": "Reply with exactly: Braincells online.",
-              "stream": False
-          }))
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": "Initialize the model. Reply only: ready."
+                  }
+              ],
+              "stream": False,
+              "keep_alive": -1
+          }
+
+          print(json.dumps(payload))
           PY
-          )" | python3 -m json.tool
+          )" >/tmp/prewarm.json
+
+          echo "Model prewarm complete."
+
+          echo
+          echo "===== Ollama process state ====="
+          ollama ps || true
+
+      # ==========================================================
+      # TEXT API TEST
+      # ==========================================================
 
       - name: Test Ollama chat API
+        shell: bash
         run: |
+          set -euo pipefail
+
+          echo
           echo "Testing /api/chat..."
 
           curl -fsS \
@@ -169,7 +388,7 @@ jobs:
           import json
           import os
 
-          print(json.dumps({
+          payload = {
               "model": os.environ["OLLAMA_MODEL"],
               "messages": [
                   {
@@ -177,18 +396,84 @@ jobs:
                       "content": "Reply with exactly: Braincells online."
                   }
               ],
-              "stream": False
-          }))
+              "stream": False,
+              "keep_alive": -1
+          }
+
+          print(json.dumps(payload))
           PY
           )" | python3 -m json.tool
 
+      # ==========================================================
+      # MULTIMODAL TEST
+      # ==========================================================
+
+      - name: Test Gemma 4 image input
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo
+          echo "=========================================="
+          echo "       TESTING IMAGE INPUT"
+          echo "=========================================="
+
+          IMAGE_B64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+          python3 - "$IMAGE_B64" "$OLLAMA_MODEL" <<'PY' \
+          | curl -fsS \
+              "http://127.0.0.1:11434/api/chat" \
+              -H "Content-Type: application/json" \
+              --data-binary @- \
+          | python3 -m json.tool
+
+          import json
+          import sys
+
+          image_b64 = sys.argv[1]
+          model = sys.argv[2]
+
+          payload = {
+              "model": model,
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": "Describe this image briefly.",
+                      "images": [image_b64]
+                  }
+              ],
+              "stream": False,
+              "keep_alive": -1
+          }
+
+          print(json.dumps(payload))
+          PY
+
+          echo
+          echo "Image-input test completed."
+
+      # ==========================================================
+      # TAILSCALE OPERATOR
+      # ==========================================================
+
       - name: Configure Tailscale operator
+        shell: bash
         run: |
           sudo tailscale set --operator="$USER" || true
 
+      # ==========================================================
+      # TAILSCALE SERVE
+      # ==========================================================
+
       - name: Configure Tailscale Serve
+        shell: bash
         run: |
-          echo "Starting Tailscale Serve on TCP 11434..."
+          set -euo pipefail
+
+          echo
+          echo "=========================================="
+          echo "        EXPOSING OLLAMA TO TAILNET"
+          echo "=========================================="
 
           tailscale serve \
             --bg \
@@ -200,32 +485,58 @@ jobs:
               tcp://127.0.0.1:11434
 
           echo
-          echo "===== Tailscale Serve status ====="
-          tailscale serve status || sudo tailscale serve status
+          echo "===== Tailscale Serve ====="
+
+          tailscale serve status \
+            || sudo tailscale serve status
+
+      # ==========================================================
+      # VERIFY SERVE
+      # ==========================================================
 
       - name: Verify Tailscale Serve
+        shell: bash
         run: |
-          echo "Checking Tailscale Serve configuration..."
+          set -euo pipefail
 
-          if ! tailscale serve status | grep -q "11434" \
-             && ! sudo tailscale serve status | grep -q "11434"; then
+          echo "Checking Tailscale Serve..."
+
+          if ! tailscale serve status 2>/dev/null | grep -q "11434" \
+             && ! sudo tailscale serve status 2>/dev/null | grep -q "11434"; then
+
             echo "ERROR: Tailscale Serve is not exposing port 11434."
             exit 1
           fi
 
           echo "Tailscale Serve is exposing port 11434."
 
+      # ==========================================================
+      # TEST TAILNET API
+      # ==========================================================
+
       - name: Test tailnet Ollama API
+        shell: bash
         run: |
-          echo "Testing:"
+          set -euo pipefail
+
+          echo
+          echo "Testing tailnet endpoint:"
           echo "http://$TS_IP:11434/api/tags"
 
           curl -fsS \
             "http://$TS_IP:11434/api/tags" \
             | python3 -m json.tool
 
+      # ==========================================================
+      # TEST TAILNET CHAT
+      # ==========================================================
+
       - name: Test tailnet chat
+        shell: bash
         run: |
+          set -euo pipefail
+
+          echo
           echo "Testing /api/chat through Tailscale..."
 
           curl -fsS \
@@ -235,62 +546,131 @@ jobs:
           import json
           import os
 
-          print(json.dumps({
+          payload = {
               "model": os.environ["OLLAMA_MODEL"],
               "messages": [
                   {
                       "role": "user",
-                      "content": "Reply with exactly: Braincells online."
+                      "content": "Reply with exactly: Tailnet Braincells online."
                   }
               ],
-              "stream": False
-          }))
+              "stream": False,
+              "keep_alive": -1
+          }
+
+          print(json.dumps(payload))
           PY
           )" | python3 -m json.tool
 
+      # ==========================================================
+      # PRINT FINAL STATUS
+      # ==========================================================
+
       - name: Print connection info
+        shell: bash
         run: |
           echo
           echo "=========================================="
           echo "       MR. BRAINCELLS ONLINE"
           echo "=========================================="
+
           echo
-          echo "Model:"
+          echo "MODEL:"
           echo "$OLLAMA_MODEL"
+
           echo
-          echo "Endpoint:"
+          echo "ENDPOINT:"
           echo "http://$TS_IP:11434"
+
           echo
           echo "API:"
-          echo "http://$TS_IP:11434/api/generate"
           echo "http://$TS_IP:11434/api/chat"
+          echo "http://$TS_IP:11434/api/generate"
+
           echo
-          echo "Tailscale IP:"
+          echo "CAPABILITIES:"
+          echo "Text"
+          echo "Image"
+
+          echo
+          echo "CONTEXT:"
+          echo "$OLLAMA_CONTEXT_LENGTH"
+
+          echo
+          echo "KEEP ALIVE:"
+          echo "$OLLAMA_KEEP_ALIVE"
+
+          echo
+          echo "FLASH ATTENTION:"
+          echo "$OLLAMA_FLASH_ATTENTION"
+
+          echo
+          echo "KV CACHE:"
+          echo "$OLLAMA_KV_CACHE_TYPE"
+
+          echo
+          echo "TAILSCALE IP:"
           echo "$TS_IP"
+
           echo
           echo "=========================================="
 
+      # ==========================================================
+      # KEEP SERVER ALIVE
+      # ==========================================================
+
       - name: Keep server alive
+        shell: bash
         run: |
-          echo "Server staying alive..."
+          set -euo pipefail
+
+          echo
+          echo "=========================================="
+          echo "       SERVER STAYING ALIVE"
+          echo "=========================================="
+          echo
+          echo "No inference timeout is configured."
+          echo "Ollama may stream responses naturally."
+          echo
 
           while true; do
+
             if ! curl -fsS \
               "http://127.0.0.1:11434/api/tags" \
               >/dev/null 2>&1; then
 
+              echo
               echo "WARNING: Ollama API stopped."
+              echo
               echo "===== Ollama log ====="
-              tail -n 100 "$HOME/ollama.log" || true
+
+              tail -n 200 \
+                "$HOME/ollama.log" \
+                || true
+
               exit 1
             fi
 
             if ! tailscale serve status 2>/dev/null | grep -q "11434" \
                && ! sudo tailscale serve status 2>/dev/null | grep -q "11434"; then
+
+              echo
               echo "WARNING: Tailscale Serve stopped."
               exit 1
             fi
 
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ollama + Tailscale OK"
+            echo
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')]"
+            echo "Ollama: OK"
+            echo "Tailscale: OK"
+
+            echo
+            echo "===== Model status ====="
+            ollama ps || true
+
+            echo
+            echo "===== Memory ====="
+            free -h
+
             sleep 60
           done
